@@ -24,28 +24,28 @@ CHECK_SPECTRAL_RADIUS: bool = True  # set True to compute/print spectral radius 
 # Which criteria to use (all enabled criteria must be satisfied with patience to stop)
 USE_CRITERIA = {
     "max_rounds": True,          # always keep a safety cap by default
-    "loss_stagnation": False,     # relative change in smoothed global loss below threshold
-    "param_stagnation": False,   # relative change in parameters (A,B,theta,phi) below threshold
-    "grad_small": False,         # mean client gradient norm small
-    "residual_small": False,     # align/consensus residuals small
+    "loss_stagnation": True,     # relative change in smoothed global loss below threshold
+    "param_stagnation": True,   # relative change in parameters (A,B,theta,phi) below threshold
+    "grad_small": True,         # mean client gradient norm small
+    "residual_small": True,     # align/consensus residuals small
 }
 
 # Stop as soon as any enabled criterion fires ("any") or only when all do ("all")
-STOP_MODE = "any"
+STOP_MODE = "all"
 
 # Thresholds and smoothing/patience (tune here)
-MAX_ROUNDS = 3000                 # safety cap; training stops earlier if other criteria trigger
+MAX_ROUNDS = 500                 # safety cap; training stops earlier if other criteria trigger
 WINDOW_W = 5                     # window width for loss smoothing (moving average)
 PATIENCE_P = 3                   # consecutive rounds that a criterion must hold
 EPS_LOSS = 1e-4                  # relative loss change threshold
-EPS_PARAM = 5e-3                 # relative parameter change threshold
-EPS_GRAD = 1e-3                  # small gradient threshold
+EPS_PARAM = 5e-5                 # relative parameter change threshold
+EPS_GRAD = 1e-8                  # small gradient threshold
 EPS_RESID = 1e-3                 # small residual threshold
 
 # Training/control knobs (non-CLI)
 SAVE_EVERY: int = 5
 SEED: int | None = 0
-MONTE_CARLO: int = 1
+MONTE_CARLO: int = 3
 
 # =========================
 # Helpers for stopping logic
@@ -937,7 +937,8 @@ def main() -> None:
     residual_norms_central: list[float] = []
     ckf_residual_blocks = {f"{i + 1}": [] for i in range(base_data.num_components)}
     for t in range(T_train):
-        ckf.predict(U_train[:, t:t + 1])
+        u_prev = U_train[:, t - 1:t] if t > 0 else np.zeros((U_train.shape[0], 1))
+        ckf.predict(u_prev)
         residual = ckf.residual(Y_train[:, t:t + 1])
         residual_norms_central.append(float(np.linalg.norm(residual)))
         for i in range(base_data.num_components):
@@ -969,14 +970,14 @@ def main() -> None:
         data = copy.deepcopy(base_data)
 
         rng = np.random.default_rng(seed_value)
-        mean_theta = -0.3
-        mean_phi = -0.2
+        mean_theta = 0
+        mean_phi = 0
         mean_A = 0
         mean_B = 0
-        sigma_theta = 0.05
-        sigma_phi = 0.05
-        sigma_A = 0.075
-        sigma_B = 0.075
+        sigma_theta = 0.01
+        sigma_phi = 0.01
+        sigma_A = 0.01
+        sigma_B = 0.01
 
         for comp_key, comp_data in data.local_learners_pack.items():
             p_m = comp_data['p_m']

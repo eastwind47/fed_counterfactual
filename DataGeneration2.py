@@ -261,7 +261,7 @@ def summarize_cross_stats(x, u, N, P, S):
 # ========================================
 if __name__ == "__main__":
     # Parameters
-    N = 16    # number of clients
+    N = 2    # number of clients
     D = 8    # measurement dim per client
     P = 2    # state dim per client
     S = 2    # input dim per client
@@ -271,7 +271,7 @@ if __name__ == "__main__":
     proc_noise = (0.001 * np.ones(N)).tolist()
 
     # Strong bidirectional coupling in A
-    dependencies = [(0, 1), (1, 0)]
+    dependencies = [(0, 1)]
 
     # Per-component diagonal process noise (diagonal blocks)
     Q_list = [proc * np.ones(P) for proc in proc_noise]  # vector -> diag per component
@@ -301,7 +301,7 @@ if __name__ == "__main__":
     summarize_cross_stats(x, u, N=N, P=P, S=S)
 
     # ---------------- Save exactly as before ----------------
-    base_path = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/scalability/num_components"
+    base_path = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/uai2026"
     os.makedirs(base_path, exist_ok=True)
     base_dir = os.path.join(base_path, f"Components_{N}")
     os.makedirs(base_dir, exist_ok=True)

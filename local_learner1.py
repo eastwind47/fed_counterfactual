@@ -66,7 +66,7 @@ class LocalModel:
 
 
 
-        h_aug_init = component_data.get('h_aug_init')
+        h_aug_init = component_data.get('h_aug_init') # It is None, I haven't assigned h_aug_init anywhere
         if h_aug_init is None:
             self.h_aug_init = self.x0.copy()
         else:
@@ -76,7 +76,7 @@ class LocalModel:
             else:
                 self.h_aug_init = base.reshape(self.p_m, 1)
 
-        y_init = component_data.get('y_init')
+        y_init = component_data.get('y_init') # It is also None, I haven't assigned anything for it yet
         if y_init is None:
             self.y_init = self.C @ self.h_aug_init
         else:
@@ -107,7 +107,8 @@ class LocalModel:
         dkf = kalman_filter.KalmanFilter(self.A, self.B, self.C, self.Q, self.R, self.P0, self.x0)
 
         for t in range(self.T):
-            dkf.predict()
+            u_prev = self.U[:, t - 1:t] if t > 0 else np.zeros((self.s_m, 1))
+            dkf.predict(u_prev)
             self.X_dkf_pred[:, t:t + 1] = dkf.get_state()
             residual = dkf.residual(self.Y[:, t:t + 1])
             self.X_dkf_resd[0, t:t + 1] = np.linalg.norm(residual)

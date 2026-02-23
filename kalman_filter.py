@@ -26,7 +26,7 @@ class KalmanFilter:
 
     def predict(self, u=0):
         # Predict the state and covariance
-        self.x = self.A @ self.x
+        self.x = self.A @ self.x + self.B @ u
         self.P = self.A @ self.P @ self.A.T + self.Q
 
     def residual(self, y):

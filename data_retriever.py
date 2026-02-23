@@ -14,18 +14,21 @@ def _run_dkf_baseline(A: np.ndarray,
                       R: np.ndarray,
                       P0: np.ndarray,
                       x0: np.ndarray,
-                      Y: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                      Y: np.ndarray,
+                      U: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run a centralized Kalman filter to produce cooperative trajectories."""
     T = Y.shape[1]
     dkf = KalmanFilter(A, B, C, Q, R, P0.copy(), x0.copy())
     p_m = A.shape[0]
+    s_m = B.shape[1]
 
     X_dkf = np.zeros((p_m, T))
     X_dkf_pred = np.zeros((p_m, T))
     X_dkf_resd = np.zeros((1, T))
 
     for t in range(T):
-        dkf.predict()
+        u_prev = U[:, t - 1:t] if t > 0 else np.zeros((s_m, 1))
+        dkf.predict(u_prev)
         X_dkf_pred[:, t:t + 1] = dkf.get_state()
         residual = dkf.residual(Y[:, t:t + 1])
         X_dkf_resd[0, t:t + 1] = np.linalg.norm(residual)
@@ -292,7 +295,7 @@ class RetrieveData:
                 }
 
                 x_dkf, x_dkf_pred, x_dkf_resd = _run_dkf_baseline(
-                    A, B, C, Q, R, P0, x0, Y_train
+                    A, B, C, Q, R, P0, x0, Y_train, U_train
                 )
                 pack = self.local_learners_pack[f'comp_{m+1}']
                 pack['Hc_tm1'] = x_dkf
