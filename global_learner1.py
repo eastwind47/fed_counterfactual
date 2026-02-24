@@ -51,6 +51,12 @@ class GlobalModel:
 
         self.grad_A = {key: np.zeros_like(val) for key, val in self.A_mn.items()}
         self.grad_B = {key: np.zeros_like(val) for key, val in self.B_mn.items()}
+        self.grad_A_norms = {key: 0.0 for key in self.A_mn}
+        self.grad_B_norms = {key: 0.0 for key in self.B_mn}
+        self.grad_A_total = 0.0
+        self.grad_B_total = 0.0
+        self.loss_align = 0.0
+        self.loss_consensus = 0.0
 
         # Server-side trajectory trackers
         self.h_server = {
@@ -93,6 +99,8 @@ class GlobalModel:
         }
 
         total_loss = 0.0
+        loss_align_total = 0.0
+        loss_consensus_total = 0.0
         gradx = {
             key: np.zeros_like(h_aug_pred[key]) for key in h_aug_pred
         }
@@ -140,6 +148,8 @@ class GlobalModel:
                 term_align = np.linalg.norm(residual_curr) ** 2
                 term_reg = self.xi * np.linalg.norm(consensus_res) ** 2
                 total_loss += term_align + term_reg
+                loss_align_total += term_align
+                loss_consensus_total += term_reg
 
                 gradx[key_m][:, t:t+1] = 2.0 * residual_curr
                 combined = residual_curr + self.xi * consensus_res
@@ -171,11 +181,33 @@ class GlobalModel:
             self.grad_B[key][:, :] = value / self.T
 
         self.server_loss = loss_value
+        self.loss_align = float(loss_align_total / self.T)
+        self.loss_consensus = float(loss_consensus_total / self.T)
+        self.grad_A_norms = {
+            key: float(np.linalg.norm(val))
+            for key, val in self.grad_A.items()
+        }
+        self.grad_B_norms = {
+            key: float(np.linalg.norm(val))
+            for key, val in self.grad_B.items()
+        }
+        self.grad_A_total = float(
+            np.sqrt(sum(val * val for val in self.grad_A_norms.values()))
+        )
+        self.grad_B_total = float(
+            np.sqrt(sum(val * val for val in self.grad_B_norms.values()))
+        )
 
         return {
             "loss": loss_value,
+            "loss_align": self.loss_align,
+            "loss_consensus": self.loss_consensus,
             "gradx": {key: gradx[key].copy() for key in gradx},
             "gradx_est": {key: gradx_est[key].copy() for key in gradx_est},
+            "grad_A_norms": self.grad_A_norms.copy(),
+            "grad_B_norms": self.grad_B_norms.copy(),
+            "grad_A_total": self.grad_A_total,
+            "grad_B_total": self.grad_B_total,
         }
 
     def apply_server_updates(self):

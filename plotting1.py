@@ -131,6 +131,26 @@ def _pretty_label(name: str) -> str:
     return name.replace("_", " ").title()
 
 
+def _is_summary_metric(metric_name: str) -> bool:
+    """Return True only for publication-style summary metrics."""
+    if metric_name in {
+        "global_loss",
+        "A_global_abs_err",
+        "A_global_rel_err",
+        "B_global_abs_err",
+        "B_global_rel_err",
+    }:
+        return True
+    return metric_name.startswith(
+        (
+            "A_abs_err_",
+            "A_rel_err_",
+            "B_abs_err_",
+            "B_rel_err_",
+        )
+    )
+
+
 def _average_blocks(block_runs: List[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
     """Average matching blocks across runs."""
     if not block_runs:
@@ -269,9 +289,6 @@ def main() -> None:
     final_B_runs = payload.get("final_B_mn", [])
     A_total_norm = float(payload.get("A_total_norm", float("nan")))
     B_total_norm = float(payload.get("B_total_norm", float("nan")))
-    ckf_ref = payload.get("ckf_avg_residual", {})  # kept for future use
-    dkf_ref = payload.get("dkf_avg_residual", {})
-
     plots_root.mkdir(parents=True, exist_ok=True)
 
     history_metrics = _collect_history_metrics(histories)
@@ -316,6 +333,8 @@ def main() -> None:
             all_metrics["B_global_rel_err"] = [run / B_total_norm for run in B_abs_runs]
 
     for metric_name, series_list in sorted(all_metrics.items()):
+        if not _is_summary_metric(metric_name):
+            continue
         try:
             _data, mean, std = _stack_runs(series_list)
         except ValueError:
@@ -323,7 +342,7 @@ def main() -> None:
 
         rounds = np.arange(1, mean.size + 1)
         fig, ax = plt.subplots(figsize=(8, 6))
-        mean_line, = ax.plot(rounds, mean, color=colorblind_colors[1])
+        ax.plot(rounds, mean, color=colorblind_colors[1])
         ax.fill_between(
             rounds,
             mean - std,
@@ -348,28 +367,6 @@ def main() -> None:
         ax.set_ylabel(ylabel, fontsize=25)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
-
-        if metric_name.startswith("local_loss_"):
-            cid = metric_name.split("_")[-1]
-            legend_handles = [mean_line]
-            legend_labels = [rf"$L_{{{cid},a}}^k$"]
-            if cid in dkf_ref and np.isfinite(dkf_ref[cid]):
-                dkf_line = ax.axhline(dkf_ref[cid], color=colorblind_colors[0], linestyle="--", linewidth=2)
-                legend_handles.append(dkf_line)
-                legend_labels.append(rf"$\frac{{1}}{{T}} \sum_{{t = 1}}^T \|r_{{{cid},c}}^t\|_2^2$")
-            # CKF baseline hidden for now; re-enable if centralized reference is needed.
-            # if cid in ckf_ref and np.isfinite(ckf_ref[cid]):
-            #     ckf_line = ax.axhline(
-            #         ckf_ref[cid],
-            #         color=colorblind_colors[3],
-            #         linestyle="-.",
-            #         linewidth=2,
-            #     )
-            #     legend_handles.append(ckf_line)
-            #     legend_labels.append(
-            #         rf"$\frac{{1}}{{T}} \sum_{{t = 1}}^T \|r_{{{cid},o}}^t\|_2^2$"
-            #     )
-            ax.legend(legend_handles, legend_labels, fontsize=20)
 
         out_path = plots_root / f"{_sanitize_name(metric_name)}.pdf"
         fig.savefig(out_path, format="pdf", dpi=800, bbox_inches="tight")

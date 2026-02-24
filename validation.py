@@ -75,6 +75,13 @@ REQUIRE_HOLDOUT_AFTER_TRAIN: bool = True
 # Set to 1 to disable smoothing.
 SMOOTH_WINDOW: int = 100
 
+# Validation-by-round diagnostics:
+# If True, evaluate every snapshot round_*.pkl for each Monte Carlo run.
+EVALUATE_BY_ROUND: bool = True
+
+# Evaluate every N-th snapshot (1 = all rounds, 2 = every other round, ...).
+BY_ROUND_STRIDE: int = 1
+
 
 def _to_1d_int(arr: np.ndarray) -> np.ndarray:
     """Convert any numeric array-like to a flattened 1D integer NumPy array."""
@@ -546,11 +553,19 @@ def _load_run_theta_phi(
     with snap_path.open("rb") as handle:
         payload = pickle.load(handle)
 
+    return _normalize_theta_phi(payload, snap_path)
+
+
+def _normalize_theta_phi(
+    payload: dict,
+    src_path: Path,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """Normalize theta/phi payload fields to numeric arrays with stable shapes."""
     if "theta" not in payload or "phi" not in payload:
-        raise KeyError(f"Snapshot missing theta/phi: {snap_path}")
+        raise KeyError(f"Snapshot missing theta/phi: {src_path}")
 
     theta = {k: np.asarray(v, dtype=float) for k, v in payload["theta"].items()}
-    phi = {}
+    phi: dict[str, np.ndarray] = {}
     for k, v in payload["phi"].items():
         arr = np.asarray(v, dtype=float)
         if arr.ndim == 1:
@@ -558,8 +573,56 @@ def _load_run_theta_phi(
         elif arr.ndim == 2 and arr.shape[1] != 1:
             arr = arr.reshape(arr.shape[0], 1)
         phi[k] = arr
-
     return theta, phi
+
+
+def _iter_run_snapshots(
+    monte_root: Path,
+    run_idx: int,
+    stride: int,
+) -> list[Path]:
+    """Return sorted snapshot paths for one run, optionally sub-sampled by stride."""
+    snap_dir = monte_root / f"mc_{run_idx:03d}" / "snapshots"
+    if not snap_dir.exists():
+        return []
+    snapshots = sorted(snap_dir.glob("round_*.pkl"))
+    if stride <= 1:
+        return snapshots
+    return snapshots[:: int(stride)]
+
+
+def _parse_round_from_snapshot(payload: dict, snapshot_path: Path) -> int:
+    """Extract integer round id from snapshot payload or fallback to filename."""
+    if "round" in payload:
+        return int(payload["round"])
+    stem = snapshot_path.stem  # expected format: round_XXXX
+    if "_" not in stem:
+        raise ValueError(f"Cannot parse round from snapshot filename: {snapshot_path.name}")
+    return int(stem.split("_")[-1])
+
+
+def _load_snapshot_model_params(
+    snapshot_path: Path,
+) -> tuple[int, dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """
+    Load model parameters from a snapshot file.
+
+    Returns
+    -------
+    tuple
+        (round_idx, A_mn, B_mn, theta, phi)
+    """
+    with snapshot_path.open("rb") as handle:
+        payload = pickle.load(handle)
+
+    if "A_mn" not in payload or "B_mn" not in payload:
+        raise KeyError(f"Snapshot missing A_mn/B_mn: {snapshot_path}")
+
+    round_idx = _parse_round_from_snapshot(payload, snapshot_path)
+    a_mn = {k: np.asarray(v, dtype=float) for k, v in payload["A_mn"].items()}
+    b_mn = {k: np.asarray(v, dtype=float) for k, v in payload["B_mn"].items()}
+    theta, phi = _normalize_theta_phi(payload, snapshot_path)
+    return round_idx, a_mn, b_mn, theta, phi
 
 
 def _evaluate_local_model_prediction(
@@ -865,6 +928,67 @@ def _plot_sqerr_traces(
         plt.close(fig)
 
 
+def _plot_rmse_by_round(
+    out_dir: Path,
+    by_round_summary_df: pd.DataFrame,
+    m_count: int,
+    dkf_rmse: np.ndarray,
+    ckf_rmse: np.ndarray,
+) -> None:
+    """Plot RMSE-vs-round per client using mean±std across Monte Carlo runs."""
+    if by_round_summary_df.empty:
+        return
+
+    for m in range(m_count):
+        cid = f"c{m + 1}"
+        sub = by_round_summary_df[by_round_summary_df["client"] == cid].copy()
+        if sub.empty:
+            continue
+        sub = sub.sort_values("round")
+
+        rounds = sub["round"].to_numpy(dtype=int)
+        fed_mean = sub["fed_server_mean"].to_numpy(dtype=float)
+        fed_std = sub["fed_server_std"].to_numpy(dtype=float)
+        local_mean = sub["local_model_mean"].to_numpy(dtype=float)
+        local_std = sub["local_model_std"].to_numpy(dtype=float)
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.plot(rounds, fed_mean, color=colorblind_colors[3], label="Fed-server mean")
+        ax.fill_between(
+            rounds,
+            np.maximum(fed_mean - fed_std, 0.0),
+            fed_mean + fed_std,
+            color=colorblind_colors[3],
+            alpha=0.25,
+            label="Fed-server $\pm$1 std",
+        )
+        ax.plot(rounds, local_mean, color=colorblind_colors[2], label="Local-model mean")
+        ax.fill_between(
+            rounds,
+            np.maximum(local_mean - local_std, 0.0),
+            local_mean + local_std,
+            color=colorblind_colors[2],
+            alpha=0.20,
+            label="Local-model $\pm$1 std",
+        )
+        ax.axhline(float(dkf_rmse[m]), color=colorblind_colors[1], linestyle="--", linewidth=2, label="DKF")
+        ax.axhline(float(ckf_rmse[m]), color=colorblind_colors[4], linestyle="-.", linewidth=2, label="CKF")
+        ax.set_xlabel("Communication round", fontsize=25)
+        ax.set_ylabel("One-step RMSE", fontsize=25)
+        ax.set_title(f"Validation RMSE vs Round (Client {m + 1})", fontsize=25)
+        ax.tick_params(axis="both", labelsize=20)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=20)
+        fig.tight_layout()
+        fig.savefig(
+            out_dir / "plots" / f"rmse_by_round_client_{m + 1}.pdf",
+            format="pdf",
+            dpi=800,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+
 def main() -> None:
     # ------------------------------------------------------------------
     # 1) Load data/config and resolve files/directories
@@ -1149,7 +1273,103 @@ def main() -> None:
     time_df.to_csv(time_csv, index=False)
 
     # ------------------------------------------------------------------
-    # 6) Save plots
+    # 6) Optional: evaluate validation RMSE for every saved snapshot round
+    # ------------------------------------------------------------------
+    by_round_csv = out_dir / "validation_by_round.csv"
+    by_round_summary_csv = out_dir / "validation_by_round_summary.csv"
+    by_round_rows: list[dict[str, float | int]] = []
+
+    if EVALUATE_BY_ROUND:
+        for run_idx in range(1, len(final_a_runs) + 1):
+            snapshot_paths = _iter_run_snapshots(
+                monte_root=monte_root,
+                run_idx=run_idx,
+                stride=max(1, int(BY_ROUND_STRIDE)),
+            )
+            for snapshot_path in snapshot_paths:
+                round_idx, a_snap, b_snap, theta_snap, phi_snap = _load_snapshot_model_params(snapshot_path)
+
+                fed_server_metrics = _evaluate_fed_server_model(
+                    data=data,
+                    dkf_states=dkf_states_full,
+                    a_offdiag=a_snap,
+                    b_offdiag=b_snap,
+                    valid_t0=valid_t0,
+                    valid_t1=valid_t1,
+                )
+                local_model_metrics = _evaluate_local_model_prediction(
+                    data=data,
+                    dkf_states=dkf_states_full,
+                    theta_by_client=theta_snap,
+                    phi_by_client=phi_snap,
+                    valid_t0=valid_t0,
+                    valid_t1=valid_t1,
+                    warm_start=WARM_START,
+                )
+
+                fed_server_rmse = np.asarray(fed_server_metrics["rmse"], dtype=float)
+                local_model_rmse = np.asarray(local_model_metrics["rmse"], dtype=float)
+
+                row: dict[str, float | int] = {
+                    "run_idx": int(run_idx),
+                    "round": int(round_idx),
+                    "valid_t0": int(valid_t0),
+                    "valid_t1": int(valid_t1),
+                    "n_steps": int(n_steps),
+                    "fed_server_rmse_overall": float(fed_server_metrics["rmse_overall"]),
+                    "local_model_rmse_overall": float(local_model_metrics["rmse_overall"]),
+                }
+                for m in range(m_count):
+                    cid = f"c{m + 1}"
+                    row[f"fed_server_rmse_{cid}"] = float(fed_server_rmse[m])
+                    row[f"local_model_rmse_{cid}"] = float(local_model_rmse[m])
+                    row[f"dkf_rmse_{cid}"] = float(dkf_rmse[m])
+                    row[f"ckf_rmse_{cid}"] = float(ckf_rmse[m])
+                by_round_rows.append(row)
+
+        if by_round_rows:
+            by_round_df = pd.DataFrame(by_round_rows).sort_values(["run_idx", "round"])
+            by_round_df.to_csv(by_round_csv, index=False)
+
+            # Aggregate by round across runs for per-client trends.
+            by_round_summary_rows: list[dict[str, float | int | str]] = []
+            grouped = by_round_df.groupby("round")
+            for round_idx, gdf in grouped:
+                n_runs_here = int(gdf["run_idx"].nunique())
+                for m in range(m_count):
+                    cid = f"c{m + 1}"
+                    fed_vals = gdf[f"fed_server_rmse_{cid}"].to_numpy(dtype=float)
+                    local_vals = gdf[f"local_model_rmse_{cid}"].to_numpy(dtype=float)
+                    by_round_summary_rows.append(
+                        {
+                            "round": int(round_idx),
+                            "client": cid,
+                            "n_runs": n_runs_here,
+                            "valid_t0": int(valid_t0),
+                            "valid_t1": int(valid_t1),
+                            "n_steps": int(n_steps),
+                            "fed_server_mean": float(np.mean(fed_vals)),
+                            "fed_server_std": float(np.std(fed_vals)),
+                            "local_model_mean": float(np.mean(local_vals)),
+                            "local_model_std": float(np.std(local_vals)),
+                            "dkf": float(dkf_rmse[m]),
+                            "ckf": float(ckf_rmse[m]),
+                        }
+                    )
+
+            by_round_summary_df = pd.DataFrame(by_round_summary_rows).sort_values(["client", "round"])
+            by_round_summary_df.to_csv(by_round_summary_csv, index=False)
+
+            _plot_rmse_by_round(
+                out_dir=out_dir,
+                by_round_summary_df=by_round_summary_df,
+                m_count=m_count,
+                dkf_rmse=dkf_rmse,
+                ckf_rmse=ckf_rmse,
+            )
+
+    # ------------------------------------------------------------------
+    # 7) Save plots
     # ------------------------------------------------------------------
     client_labels = [f"c{m + 1}" for m in range(m_count)]
     _plot_rmse_summary(
@@ -1179,6 +1399,12 @@ def main() -> None:
     print(f"Run metrics: {run_csv}")
     print(f"Summary: {summary_csv}")
     print(f"Time-series: {time_csv}")
+    if EVALUATE_BY_ROUND:
+        if by_round_rows:
+            print(f"By-round metrics: {by_round_csv}")
+            print(f"By-round summary: {by_round_summary_csv}")
+        else:
+            print("By-round metrics: no snapshots found; skipped.")
     print(f"Plots dir: {out_dir / 'plots'}")
 
 

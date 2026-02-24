@@ -46,6 +46,7 @@ EPS_RESID = 1e-3                 # small residual threshold
 SAVE_EVERY: int = 5
 SEED: int | None = 0
 MONTE_CARLO: int = 3
+EPS_DIAG: float = 1e-12
 
 # =========================
 # Helpers for stopping logic
@@ -281,11 +282,49 @@ def build_models(
     return local_models, global_model, u_global, analyzer
 
 
+def _block_norms(blocks: dict[str, np.ndarray]) -> tuple[dict[str, float], float]:
+    """Return per-block Frobenius norms and the global stacked Frobenius norm."""
+    per_block = {
+        key: float(np.linalg.norm(val))
+        for key, val in blocks.items()
+    }
+    total = float(np.sqrt(sum(val * val for val in per_block.values())))
+    return per_block, total
+
+
+def _block_step_metrics(
+    current: dict[str, np.ndarray],
+    previous: dict[str, np.ndarray],
+    eps: float = EPS_DIAG,
+) -> tuple[dict[str, float], dict[str, float], float, float]:
+    """Return per-block and total absolute/relative parameter-step metrics."""
+    step = {
+        key: float(np.linalg.norm(current[key] - previous[key]))
+        for key in current
+    }
+    rel_step = {
+        key: float(step[key] / max(float(np.linalg.norm(previous[key])), eps))
+        for key in step
+    }
+    step_total = float(np.sqrt(sum(val * val for val in step.values())))
+    prev_total = float(np.sqrt(sum(float(np.linalg.norm(val)) ** 2 for val in previous.values())))
+    rel_total = float(step_total / max(prev_total, eps))
+    return step, rel_step, step_total, rel_total
+
+
 def run_round(
     global_model: GlobalModel,
     local_models: dict[str, LocalModel],
     u_global: dict[str, np.ndarray],
-) -> tuple[float, dict[str, float], dict[str, float], dict[str, float], float, float]:
+) -> tuple[
+    float,
+    dict[str, float],
+    dict[str, float],
+    dict[str, float],
+    float,
+    float,
+    dict[str, float | dict[str, float]],
+]:
     """One training round: local fwd pass → server step → local updates."""
     h_aug_pred = {}                # client augmented predicted states (to server)
     h_aug_est = {}                 # client augmented estimated states (to server)
@@ -321,6 +360,25 @@ def run_round(
         sum(np.linalg.norm(val) for val in global_model.consensus_history.values())
         / max(global_model.T, 1)
     )
+    loss_align = float(server_out.get("loss_align", 0.0))
+    loss_consensus = float(server_out.get("loss_consensus", 0.0))
+    loss_total = max(loss_align + loss_consensus, EPS_DIAG)
+    server_diagnostics: dict[str, float | dict[str, float]] = {
+        "loss_align": loss_align,
+        "loss_consensus": loss_consensus,
+        "loss_align_frac": float(loss_align / loss_total),
+        "loss_consensus_frac": float(loss_consensus / loss_total),
+        "gradA_norms": {
+            key: float(val)
+            for key, val in server_out.get("grad_A_norms", {}).items()
+        },
+        "gradB_norms": {
+            key: float(val)
+            for key, val in server_out.get("grad_B_norms", {}).items()
+        },
+        "gradA_norm_total": float(server_out.get("grad_A_total", 0.0)),
+        "gradB_norm_total": float(server_out.get("grad_B_total", 0.0)),
+    }
 
     return (
         float(server_out["loss"]),  # global/server loss this round
@@ -329,6 +387,7 @@ def run_round(
         residual_norms,              # dict of local residual norms
         align_norm,                  # alignment residual aggregate
         consensus_norm,              # consensus residual aggregate
+        server_diagnostics,          # decomposition + parameter gradient norms
     )
 
 
@@ -438,12 +497,32 @@ def main() -> None:
         "global_loss": [],
         "align_norm": [],
         "consensus_norm": [],
+        "loss_align": [],
+        "loss_consensus": [],
+        "loss_align_frac": [],
+        "loss_consensus_frac": [],
+        "gradA_norm_total": [],
+        "gradB_norm_total": [],
+        "A_norm_total": [],
+        "B_norm_total": [],
+        "A_step_total": [],
+        "B_step_total": [],
+        "A_rel_step_total": [],
+        "B_rel_step_total": [],
         "local_loss": {cid: [] for cid in component_ids},
         "grad_norm": {cid: [] for cid in component_ids},
         "residual_norm": {cid: [] for cid in component_ids},
         "theta_norm": {cid: [] for cid in component_ids},
         "phi_norm": {cid: [] for cid in component_ids},
         "phi_consensus_err": {cid: [] for cid in component_ids},
+        "gradA_norm": {key: [] for key in offdiag_keys},
+        "gradB_norm": {key: [] for key in offdiag_keys},
+        "A_norm": {key: [] for key in offdiag_keys},
+        "B_norm": {key: [] for key in offdiag_keys},
+        "A_step": {key: [] for key in offdiag_keys},
+        "B_step": {key: [] for key in offdiag_keys},
+        "A_rel_step": {key: [] for key in offdiag_keys},
+        "B_rel_step": {key: [] for key in offdiag_keys},
     }
     history["A_abs_err"] = {key: [] for key in offdiag_keys}
     history["B_abs_err"] = {key: [] for key in offdiag_keys}
@@ -473,6 +552,7 @@ def main() -> None:
             residual_norms,
             align_norm,
             consensus_norm,
+            server_diagnostics,
         ) = run_round(global_model, local_models, u_global)
 
         A_abs_err: dict[str, float] = {}
@@ -503,19 +583,59 @@ def main() -> None:
             A_rel_err[key] = A_rel
             B_rel_err[key] = B_rel
 
-        last_A_mn = {key: global_model.A_mn[key].copy() for key in offdiag_keys}
-        last_B_mn = {key: global_model.B_mn[key].copy() for key in offdiag_keys}
+        gradA_norms = {
+            key: float(server_diagnostics.get("gradA_norms", {}).get(key, 0.0))
+            for key in offdiag_keys
+        }
+        gradB_norms = {
+            key: float(server_diagnostics.get("gradB_norms", {}).get(key, 0.0))
+            for key in offdiag_keys
+        }
+        A_norms, A_norm_total = _block_norms(global_model.A_mn)
+        B_norms, B_norm_total = _block_norms(global_model.B_mn)
+        A_step, A_rel_step, A_step_total, A_rel_step_total = _block_step_metrics(
+            global_model.A_mn,
+            last_A_mn,
+        )
+        B_step, B_rel_step, B_step_total, B_rel_step_total = _block_step_metrics(
+            global_model.B_mn,
+            last_B_mn,
+        )
 
         history["round"].append(round_idx)
         history["global_loss"].append(global_loss)
         history["align_norm"].append(align_norm)
         history["consensus_norm"].append(consensus_norm)
+        history["loss_align"].append(float(server_diagnostics.get("loss_align", 0.0)))
+        history["loss_consensus"].append(float(server_diagnostics.get("loss_consensus", 0.0)))
+        history["loss_align_frac"].append(float(server_diagnostics.get("loss_align_frac", 0.0)))
+        history["loss_consensus_frac"].append(float(server_diagnostics.get("loss_consensus_frac", 0.0)))
+        history["gradA_norm_total"].append(float(server_diagnostics.get("gradA_norm_total", 0.0)))
+        history["gradB_norm_total"].append(float(server_diagnostics.get("gradB_norm_total", 0.0)))
+        history["A_norm_total"].append(A_norm_total)
+        history["B_norm_total"].append(B_norm_total)
+        history["A_step_total"].append(A_step_total)
+        history["B_step_total"].append(B_step_total)
+        history["A_rel_step_total"].append(A_rel_step_total)
+        history["B_rel_step_total"].append(B_rel_step_total)
 
         row = {
             "round": round_idx,
             "global_loss": global_loss,
             "align_norm": align_norm,
             "consensus_norm": consensus_norm,
+            "loss_align": float(server_diagnostics.get("loss_align", 0.0)),
+            "loss_consensus": float(server_diagnostics.get("loss_consensus", 0.0)),
+            "loss_align_frac": float(server_diagnostics.get("loss_align_frac", 0.0)),
+            "loss_consensus_frac": float(server_diagnostics.get("loss_consensus_frac", 0.0)),
+            "gradA_norm_total": float(server_diagnostics.get("gradA_norm_total", 0.0)),
+            "gradB_norm_total": float(server_diagnostics.get("gradB_norm_total", 0.0)),
+            "A_norm_total": A_norm_total,
+            "B_norm_total": B_norm_total,
+            "A_step_total": A_step_total,
+            "B_step_total": B_step_total,
+            "A_rel_step_total": A_rel_step_total,
+            "B_rel_step_total": B_rel_step_total,
         }
 
         for cid in component_ids:
@@ -552,8 +672,27 @@ def main() -> None:
             row[f"B_abs_err_{key}"] = B_abs_err[key]
             row[f"A_rel_err_{key}"] = A_rel_err[key]
             row[f"B_rel_err_{key}"] = B_rel_err[key]
+            row[f"gradA_norm_{key}"] = gradA_norms[key]
+            row[f"gradB_norm_{key}"] = gradB_norms[key]
+            row[f"A_norm_{key}"] = A_norms[key]
+            row[f"B_norm_{key}"] = B_norms[key]
+            row[f"A_step_{key}"] = A_step[key]
+            row[f"B_step_{key}"] = B_step[key]
+            row[f"A_rel_step_{key}"] = A_rel_step[key]
+            row[f"B_rel_step_{key}"] = B_rel_step[key]
+            history["gradA_norm"][key].append(gradA_norms[key])
+            history["gradB_norm"][key].append(gradB_norms[key])
+            history["A_norm"][key].append(A_norms[key])
+            history["B_norm"][key].append(B_norms[key])
+            history["A_step"][key].append(A_step[key])
+            history["B_step"][key].append(B_step[key])
+            history["A_rel_step"][key].append(A_rel_step[key])
+            history["B_rel_step"][key].append(B_rel_step[key])
 
         metric_rows.append(row)
+
+        last_A_mn = {key: global_model.A_mn[key].copy() for key in offdiag_keys}
+        last_B_mn = {key: global_model.B_mn[key].copy() for key in offdiag_keys}
 
         print(
             f"Round {round_idx:03d} | global loss {global_loss:.6e} | "
@@ -676,12 +815,32 @@ def run_single_experiment(
         "global_loss": [],
         "align_norm": [],
         "consensus_norm": [],
+        "loss_align": [],
+        "loss_consensus": [],
+        "loss_align_frac": [],
+        "loss_consensus_frac": [],
+        "gradA_norm_total": [],
+        "gradB_norm_total": [],
+        "A_norm_total": [],
+        "B_norm_total": [],
+        "A_step_total": [],
+        "B_step_total": [],
+        "A_rel_step_total": [],
+        "B_rel_step_total": [],
         "local_loss": {cid: [] for cid in component_ids},
         "grad_norm": {cid: [] for cid in component_ids},
         "residual_norm": {cid: [] for cid in component_ids},
         "theta_norm": {cid: [] for cid in component_ids},
         "phi_norm": {cid: [] for cid in component_ids},
         "phi_consensus_err": {cid: [] for cid in component_ids},
+        "gradA_norm": {key: [] for key in offdiag_keys},
+        "gradB_norm": {key: [] for key in offdiag_keys},
+        "A_norm": {key: [] for key in offdiag_keys},
+        "B_norm": {key: [] for key in offdiag_keys},
+        "A_step": {key: [] for key in offdiag_keys},
+        "B_step": {key: [] for key in offdiag_keys},
+        "A_rel_step": {key: [] for key in offdiag_keys},
+        "B_rel_step": {key: [] for key in offdiag_keys},
     }
     metric_rows: list[dict[str, float]] = []
     history["A_abs_err"] = {key: [] for key in offdiag_keys}
@@ -711,6 +870,7 @@ def run_single_experiment(
             residual_norms,
             align_norm,
             consensus_norm,
+            server_diagnostics,
         ) = run_round(global_model, local_models, u_global)
 
         A_abs_err: dict[str, float] = {}
@@ -741,19 +901,59 @@ def run_single_experiment(
             A_rel_err[key] = A_rel
             B_rel_err[key] = B_rel
 
-        last_A_mn = {key: global_model.A_mn[key].copy() for key in offdiag_keys}
-        last_B_mn = {key: global_model.B_mn[key].copy() for key in offdiag_keys}
+        gradA_norms = {
+            key: float(server_diagnostics.get("gradA_norms", {}).get(key, 0.0))
+            for key in offdiag_keys
+        }
+        gradB_norms = {
+            key: float(server_diagnostics.get("gradB_norms", {}).get(key, 0.0))
+            for key in offdiag_keys
+        }
+        A_norms, A_norm_total = _block_norms(global_model.A_mn)
+        B_norms, B_norm_total = _block_norms(global_model.B_mn)
+        A_step, A_rel_step, A_step_total, A_rel_step_total = _block_step_metrics(
+            global_model.A_mn,
+            last_A_mn,
+        )
+        B_step, B_rel_step, B_step_total, B_rel_step_total = _block_step_metrics(
+            global_model.B_mn,
+            last_B_mn,
+        )
 
         history["round"].append(round_idx)
         history["global_loss"].append(global_loss)
         history["align_norm"].append(align_norm)
         history["consensus_norm"].append(consensus_norm)
+        history["loss_align"].append(float(server_diagnostics.get("loss_align", 0.0)))
+        history["loss_consensus"].append(float(server_diagnostics.get("loss_consensus", 0.0)))
+        history["loss_align_frac"].append(float(server_diagnostics.get("loss_align_frac", 0.0)))
+        history["loss_consensus_frac"].append(float(server_diagnostics.get("loss_consensus_frac", 0.0)))
+        history["gradA_norm_total"].append(float(server_diagnostics.get("gradA_norm_total", 0.0)))
+        history["gradB_norm_total"].append(float(server_diagnostics.get("gradB_norm_total", 0.0)))
+        history["A_norm_total"].append(A_norm_total)
+        history["B_norm_total"].append(B_norm_total)
+        history["A_step_total"].append(A_step_total)
+        history["B_step_total"].append(B_step_total)
+        history["A_rel_step_total"].append(A_rel_step_total)
+        history["B_rel_step_total"].append(B_rel_step_total)
 
         row = {
             "round": round_idx,
             "global_loss": global_loss,
             "align_norm": align_norm,
             "consensus_norm": consensus_norm,
+            "loss_align": float(server_diagnostics.get("loss_align", 0.0)),
+            "loss_consensus": float(server_diagnostics.get("loss_consensus", 0.0)),
+            "loss_align_frac": float(server_diagnostics.get("loss_align_frac", 0.0)),
+            "loss_consensus_frac": float(server_diagnostics.get("loss_consensus_frac", 0.0)),
+            "gradA_norm_total": float(server_diagnostics.get("gradA_norm_total", 0.0)),
+            "gradB_norm_total": float(server_diagnostics.get("gradB_norm_total", 0.0)),
+            "A_norm_total": A_norm_total,
+            "B_norm_total": B_norm_total,
+            "A_step_total": A_step_total,
+            "B_step_total": B_step_total,
+            "A_rel_step_total": A_rel_step_total,
+            "B_rel_step_total": B_rel_step_total,
         }
 
         for cid in component_ids:
@@ -791,8 +991,27 @@ def run_single_experiment(
             row[f"B_abs_err_{key}"] = B_abs_err[key]
             row[f"A_rel_err_{key}"] = A_rel_err[key]
             row[f"B_rel_err_{key}"] = B_rel_err[key]
+            row[f"gradA_norm_{key}"] = gradA_norms[key]
+            row[f"gradB_norm_{key}"] = gradB_norms[key]
+            row[f"A_norm_{key}"] = A_norms[key]
+            row[f"B_norm_{key}"] = B_norms[key]
+            row[f"A_step_{key}"] = A_step[key]
+            row[f"B_step_{key}"] = B_step[key]
+            row[f"A_rel_step_{key}"] = A_rel_step[key]
+            row[f"B_rel_step_{key}"] = B_rel_step[key]
+            history["gradA_norm"][key].append(gradA_norms[key])
+            history["gradB_norm"][key].append(gradB_norms[key])
+            history["A_norm"][key].append(A_norms[key])
+            history["B_norm"][key].append(B_norms[key])
+            history["A_step"][key].append(A_step[key])
+            history["B_step"][key].append(B_step[key])
+            history["A_rel_step"][key].append(A_rel_step[key])
+            history["B_rel_step"][key].append(B_rel_step[key])
 
         metric_rows.append(row)
+
+        last_A_mn = {key: global_model.A_mn[key].copy() for key in offdiag_keys}
+        last_B_mn = {key: global_model.B_mn[key].copy() for key in offdiag_keys}
 
         print(
             f"[MC {exp_idx + 1:03d}] Round {round_idx:03d} | global loss {global_loss:.6e} | "
@@ -893,6 +1112,7 @@ def main() -> None:
     A_true_norms: dict[str, float] = {}
     B_true_norms: dict[str, float] = {}
     dkf_avg_residual: dict[str, float] = {}
+    dkf_avg_sq_residual: dict[str, float] = {}
     for i in range(base_data.num_components):
         row_start = int(comp_start_vec[i])
         row_end = row_start + int(p_vec_ref[i])
@@ -914,8 +1134,10 @@ def main() -> None:
         if residual_array is not None:
             residual_vals = np.asarray(residual_array, dtype=float).reshape(-1)
             dkf_avg_residual[f"{i + 1}"] = float(np.mean(residual_vals)) if residual_vals.size > 0 else float("nan")
+            dkf_avg_sq_residual[f"{i + 1}"] = float(np.mean(residual_vals**2)) if residual_vals.size > 0 else float("nan")
         else:
             dkf_avg_residual[f"{i + 1}"] = float("nan")
+            dkf_avg_sq_residual[f"{i + 1}"] = float("nan")
 
     # Centralized Kalman filter baseline (full system)
     from kalman_filter import KalmanFilter
@@ -974,10 +1196,10 @@ def main() -> None:
         mean_phi = 0
         mean_A = 0
         mean_B = 0
-        sigma_theta = 0.01
-        sigma_phi = 0.01
-        sigma_A = 0.01
-        sigma_B = 0.01
+        sigma_theta = 0.02
+        sigma_phi = 0.02
+        sigma_A = 0.02
+        sigma_B = 0.02
 
         for comp_key, comp_data in data.local_learners_pack.items():
             p_m = comp_data['p_m']
@@ -1045,6 +1267,7 @@ def main() -> None:
         "B_total_norm": B_total_norm,
         "ckf_avg_residual": ckf_avg_residual,
         "dkf_avg_residual": dkf_avg_residual,
+        "dkf_avg_sq_residual": dkf_avg_sq_residual,
     }
 
     monte_path = base_results_dir / "monte_carlo_history.pkl"
