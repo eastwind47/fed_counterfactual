@@ -26,18 +26,18 @@ USE_CRITERIA = {
     "max_rounds": True,          # always keep a safety cap by default
     "loss_stagnation": True,     # relative change in smoothed global loss below threshold
     "param_stagnation": True,   # relative change in parameters (A,B,theta,phi) below threshold
-    "grad_small": True,         # mean client gradient norm small
-    "residual_small": True,     # align/consensus residuals small
+    "grad_small": False,         # mean client gradient norm small
+    "residual_small": False,     # align/consensus residuals small
 }
 
 # Stop as soon as any enabled criterion fires ("any") or only when all do ("all")
-STOP_MODE = "all"
+STOP_MODE = "any"
 
 # Thresholds and smoothing/patience (tune here)
-MAX_ROUNDS = 500                 # safety cap; training stops earlier if other criteria trigger
-WINDOW_W = 5                     # window width for loss smoothing (moving average)
-PATIENCE_P = 3                   # consecutive rounds that a criterion must hold
-EPS_LOSS = 1e-4                  # relative loss change threshold
+MAX_ROUNDS = 24                 # safety cap; training stops earlier if other criteria trigger
+WINDOW_W = 1                     # window width for loss smoothing (moving average)
+PATIENCE_P = 15                   # consecutive rounds that a criterion must hold
+EPS_LOSS = 1e-5                 # relative loss change threshold
 EPS_PARAM = 5e-5                 # relative parameter change threshold
 EPS_GRAD = 1e-8                  # small gradient threshold
 EPS_RESID = 1e-3                 # small residual threshold
