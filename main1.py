@@ -34,18 +34,18 @@ USE_CRITERIA = {
 STOP_MODE = "any"
 
 # Thresholds and smoothing/patience (tune here)
-MAX_ROUNDS = 24                 # safety cap; training stops earlier if other criteria trigger
+MAX_ROUNDS = 200                 # safety cap; training stops earlier if other criteria trigger
 WINDOW_W = 1                     # window width for loss smoothing (moving average)
 PATIENCE_P = 15                   # consecutive rounds that a criterion must hold
-EPS_LOSS = 1e-5                 # relative loss change threshold
-EPS_PARAM = 5e-5                 # relative parameter change threshold
+EPS_LOSS = 1e-8                 # relative loss change threshold
+EPS_PARAM = 1e-8                 # relative parameter change threshold
 EPS_GRAD = 1e-8                  # small gradient threshold
 EPS_RESID = 1e-3                 # small residual threshold
 
 # Training/control knobs (non-CLI)
 SAVE_EVERY: int = 5
 SEED: int | None = 0
-MONTE_CARLO: int = 3
+MONTE_CARLO: int = 2
 EPS_DIAG: float = 1e-12
 
 # =========================

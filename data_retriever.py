@@ -37,6 +37,14 @@ def _run_dkf_baseline(A: np.ndarray,
 
     return X_dkf, X_dkf_pred, X_dkf_resd
 
+
+def _residual_norm_from_pred(C: np.ndarray,
+                             X_dkf_pred: np.ndarray,
+                             Y: np.ndarray) -> np.ndarray:
+    """Compute per-time residual norms from predicted DKF states."""
+    y_hat = C @ X_dkf_pred
+    return np.linalg.norm(Y - y_hat, axis=0, keepdims=True)
+
 class RetrieveData:
     def __init__(self, ini_file_name):
         """
@@ -294,14 +302,39 @@ class RetrieveData:
                     'phi0': np.zeros((p_m, 1)),
                 }
 
-                x_dkf, x_dkf_pred, x_dkf_resd = _run_dkf_baseline(
-                    A, B, C, Q, R, P0, x0, Y_train, U_train
-                )
+                x_dkf_pred_csv = os.path.join(data_location, f'C{m+1}/X_dkf_pred.csv')
+                x_dkf_est_csv = os.path.join(data_location, f'C{m+1}/X_dkf_est.csv')
+
+                has_pred_csv = os.path.exists(x_dkf_pred_csv)
+                has_est_csv = os.path.exists(x_dkf_est_csv)
+                if has_pred_csv != has_est_csv:
+                    raise FileNotFoundError(
+                        f"Expected both DKF files or none for component {m+1}: "
+                        f"{x_dkf_pred_csv}, {x_dkf_est_csv}"
+                    )
+
+                if has_pred_csv and has_est_csv:
+                    df_x_dkf_pred = pd.read_csv(x_dkf_pred_csv, header=None)
+                    df_x_dkf_est = pd.read_csv(x_dkf_est_csv, header=None)
+                    x_dkf_pred_full = df_x_dkf_pred.to_numpy().T
+                    x_dkf_full = df_x_dkf_est.to_numpy().T
+
+                    x_dkf = x_dkf_full[:, :self.training_time]
+                    x_dkf_pred = x_dkf_pred_full[:, :self.training_time]
+                    x_dkf_resd = _residual_norm_from_pred(C, x_dkf_pred, Y_train)
+                else:
+                    x_dkf, x_dkf_pred, x_dkf_resd = _run_dkf_baseline(
+                        A, B, C, Q, R, P0, x0, Y_train, U_train
+                    )
+
                 pack = self.local_learners_pack[f'comp_{m+1}']
                 pack['Hc_tm1'] = x_dkf
                 pack['X_dkf'] = x_dkf
                 pack['X_dkf_pred'] = x_dkf_pred
                 pack['X_dkf_resd'] = x_dkf_resd
+                if has_pred_csv and has_est_csv:
+                    pack['X_dkf_full'] = x_dkf_full
+                    pack['X_dkf_pred_full'] = x_dkf_pred_full
 
                 # self.validation_pack[f'comp_{m+1}'] = {  # Commented out
                 #     'B': B,

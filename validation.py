@@ -52,11 +52,11 @@ CONFIG_PATH = "config.ini"
 # If None, defaults to:
 #   <results_location>/main1/monte_carlo_history.pkl
 # where results_location comes from config.ini loaded by RetrieveData.
-MONTE_HISTORY_PATH: str = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/uai2026/fedcount-results/main1/monte_carlo_history.pkl"
+MONTE_HISTORY_PATH: str = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/uai2026/exp-results/fedcount/dissimilar-dkf/main1/monte_carlo_history.pkl"
 
 # If None, defaults to:
 #   <directory_of_monte_history>/validation
-VALIDATION_OUTPUT_DIR: str = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/uai2026/fedcount-results/valid_results"
+VALIDATION_OUTPUT_DIR: str = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/uai2026/exp-results/fedcount/dissimilar-dkf/valid_results"
 
 # Validation window:
 # - If VALID_T0 is None, it defaults to training_time.
@@ -379,6 +379,61 @@ def _evaluate_dkf_local(
     }
 
 
+def _evaluate_dkf_local_from_precomputed(
+    data: RetrieveData,
+    valid_t0: int,
+    valid_t1: int,
+) -> dict[str, np.ndarray | float]:
+    """
+    Evaluate DKF baseline using precomputed one-step DKF predictions from data.
+
+    Expected per client in local_learners_pack:
+      - X_dkf_pred_full: shape (p_m, total_time)
+      - C: local measurement matrix
+      - Y_full: full measured outputs (from full A/B data generation)
+    """
+    m_count = int(data.num_components)
+    n_steps = valid_t1 - valid_t0
+    d_vec = _to_1d_int(data.output_size_vec)
+
+    sqerr_sum = np.zeros(m_count, dtype=float)
+    sqerr_time = np.zeros((m_count, n_steps), dtype=float)
+    total_sqerr = 0.0
+
+    for m in range(m_count):
+        cid = f"{m + 1}"
+        comp = data.local_learners_pack[f"comp_{cid}"]
+
+        if "X_dkf_pred_full" not in comp:
+            raise KeyError(f"Missing precomputed key X_dkf_pred_full for client {cid}.")
+
+        x_pred_full = np.asarray(comp["X_dkf_pred_full"], dtype=float)
+        c_mat = np.asarray(comp["C"], dtype=float)
+        y_full = np.asarray(comp["Y_full"], dtype=float)
+
+        for k, t in enumerate(range(valid_t0, valid_t1)):
+            y_pred = c_mat @ x_pred_full[:, t:t + 1]
+            y_t = y_full[:, t:t + 1]
+            err = y_t - y_pred
+            sq = float(np.sum(err ** 2))
+            sqerr_sum[m] += sq
+            sqerr_time[m, k] = sq
+            total_sqerr += sq
+
+    rmse = np.sqrt(sqerr_sum / float(n_steps))
+    rmse_per_dim = np.sqrt((sqerr_sum / d_vec.astype(float)) / float(n_steps))
+    rmse_overall = float(np.sqrt(total_sqerr / float(n_steps)))
+
+    return {
+        "rmse": rmse,
+        "rmse_per_dim": rmse_per_dim,
+        "rmse_overall": rmse_overall,
+        "sqerr_time": sqerr_time,
+        "sqerr_sum": sqerr_sum,
+        "sqerr_total": total_sqerr,
+    }
+
+
 def _compute_dkf_states_full(data: RetrieveData) -> dict[str, np.ndarray]:
     """
     Compute full-horizon DKF cooperative states for each client.
@@ -393,6 +448,11 @@ def _compute_dkf_states_full(data: RetrieveData) -> dict[str, np.ndarray]:
     for m in range(m_count):
         cid = f"{m + 1}"
         comp = data.local_learners_pack[f"comp_{cid}"]
+
+        # If precomputed full trajectories exist, prefer them.
+        if "X_dkf_full" in comp:
+            dkf_states[cid] = np.asarray(comp["X_dkf_full"], dtype=float)
+            continue
 
         a_mat = np.asarray(comp["A"], dtype=float)
         b_mat = np.asarray(comp["B"], dtype=float)
@@ -1048,7 +1108,14 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 2) Evaluate fixed baselines once (same for all MC runs)
     # ------------------------------------------------------------------
-    dkf_metrics = _evaluate_dkf_local(data, valid_t0, valid_t1, WARM_START)
+    has_precomputed_dkf = all(
+        "X_dkf_pred_full" in data.local_learners_pack[f"comp_{m + 1}"]
+        for m in range(m_count)
+    )
+    if has_precomputed_dkf:
+        dkf_metrics = _evaluate_dkf_local_from_precomputed(data, valid_t0, valid_t1)
+    else:
+        dkf_metrics = _evaluate_dkf_local(data, valid_t0, valid_t1, WARM_START)
     ckf_metrics = _kalman_predict_eval(
         a_mat=np.asarray(ckf["A_complete"], dtype=float),
         b_mat=np.asarray(ckf["B_complete"], dtype=float),

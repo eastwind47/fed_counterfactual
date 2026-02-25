@@ -115,10 +115,6 @@ class LocalModel:
             dkf.update(self.Y[:, t:t + 1])
             self.X_dkf[:, t:t + 1] = dkf.get_state()
 
-    def ensure_dkf_rollout(self) -> None:
-        """Ensure DKF buffers are populated before a local forward pass."""
-        if not np.any(self.X_dkf):
-            self.run_DKF()
 
     # ------------------------------------------------------------------
     # Algorithm 1 (client) – lines 9–14
@@ -133,8 +129,6 @@ class LocalModel:
             estimate ``h_aug_est``, the cooperative baseline ``h_coop``, the
             measurement residuals, and the scalar local loss.
         """
-        self.ensure_dkf_rollout()
-
         # Reset buffers for the new pass
         self.h_aug_pred.fill(0.0)
         self.h_aug_est.fill(0.0)
