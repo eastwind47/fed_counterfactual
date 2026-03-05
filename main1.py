@@ -45,7 +45,7 @@ EPS_RESID = 1e-3                 # small residual threshold
 # Training/control knobs (non-CLI)
 SAVE_EVERY: int = 5
 SEED: int | None = 0
-MONTE_CARLO: int = 2
+MONTE_CARLO: int = 3
 EPS_DIAG: float = 1e-12
 
 # =========================
@@ -362,12 +362,15 @@ def run_round(
     )
     loss_align = float(server_out.get("loss_align", 0.0))
     loss_consensus = float(server_out.get("loss_consensus", 0.0))
-    loss_total = max(loss_align + loss_consensus, EPS_DIAG)
+    loss_param_reg = float(server_out.get("loss_param_reg", 0.0))
+    loss_total = max(loss_align + loss_consensus + loss_param_reg, EPS_DIAG)
     server_diagnostics: dict[str, float | dict[str, float]] = {
         "loss_align": loss_align,
         "loss_consensus": loss_consensus,
+        "loss_param_reg": loss_param_reg,
         "loss_align_frac": float(loss_align / loss_total),
         "loss_consensus_frac": float(loss_consensus / loss_total),
+        "loss_param_reg_frac": float(loss_param_reg / loss_total),
         "gradA_norms": {
             key: float(val)
             for key, val in server_out.get("grad_A_norms", {}).items()
@@ -501,6 +504,8 @@ def main() -> None:
         "loss_consensus": [],
         "loss_align_frac": [],
         "loss_consensus_frac": [],
+        "loss_param_reg": [],
+        "loss_param_reg_frac": [],
         "gradA_norm_total": [],
         "gradB_norm_total": [],
         "A_norm_total": [],
@@ -610,6 +615,8 @@ def main() -> None:
         history["loss_consensus"].append(float(server_diagnostics.get("loss_consensus", 0.0)))
         history["loss_align_frac"].append(float(server_diagnostics.get("loss_align_frac", 0.0)))
         history["loss_consensus_frac"].append(float(server_diagnostics.get("loss_consensus_frac", 0.0)))
+        history["loss_param_reg"].append(float(server_diagnostics.get("loss_param_reg", 0.0)))
+        history["loss_param_reg_frac"].append(float(server_diagnostics.get("loss_param_reg_frac", 0.0)))
         history["gradA_norm_total"].append(float(server_diagnostics.get("gradA_norm_total", 0.0)))
         history["gradB_norm_total"].append(float(server_diagnostics.get("gradB_norm_total", 0.0)))
         history["A_norm_total"].append(A_norm_total)
@@ -628,6 +635,8 @@ def main() -> None:
             "loss_consensus": float(server_diagnostics.get("loss_consensus", 0.0)),
             "loss_align_frac": float(server_diagnostics.get("loss_align_frac", 0.0)),
             "loss_consensus_frac": float(server_diagnostics.get("loss_consensus_frac", 0.0)),
+            "loss_param_reg": float(server_diagnostics.get("loss_param_reg", 0.0)),
+            "loss_param_reg_frac": float(server_diagnostics.get("loss_param_reg_frac", 0.0)),
             "gradA_norm_total": float(server_diagnostics.get("gradA_norm_total", 0.0)),
             "gradB_norm_total": float(server_diagnostics.get("gradB_norm_total", 0.0)),
             "A_norm_total": A_norm_total,
@@ -696,7 +705,8 @@ def main() -> None:
 
         print(
             f"Round {round_idx:03d} | global loss {global_loss:.6e} | "
-            f"align {align_norm:.3e} | consensus {consensus_norm:.3e}"
+            f"align {align_norm:.3e} | consensus {consensus_norm:.3e} | "
+            f"reg {server_diagnostics.get('loss_param_reg', 0.0):.3e}"
         )
 
         curr_params = {
@@ -819,6 +829,8 @@ def run_single_experiment(
         "loss_consensus": [],
         "loss_align_frac": [],
         "loss_consensus_frac": [],
+        "loss_param_reg": [],
+        "loss_param_reg_frac": [],
         "gradA_norm_total": [],
         "gradB_norm_total": [],
         "A_norm_total": [],
@@ -928,6 +940,8 @@ def run_single_experiment(
         history["loss_consensus"].append(float(server_diagnostics.get("loss_consensus", 0.0)))
         history["loss_align_frac"].append(float(server_diagnostics.get("loss_align_frac", 0.0)))
         history["loss_consensus_frac"].append(float(server_diagnostics.get("loss_consensus_frac", 0.0)))
+        history["loss_param_reg"].append(float(server_diagnostics.get("loss_param_reg", 0.0)))
+        history["loss_param_reg_frac"].append(float(server_diagnostics.get("loss_param_reg_frac", 0.0)))
         history["gradA_norm_total"].append(float(server_diagnostics.get("gradA_norm_total", 0.0)))
         history["gradB_norm_total"].append(float(server_diagnostics.get("gradB_norm_total", 0.0)))
         history["A_norm_total"].append(A_norm_total)
@@ -946,6 +960,8 @@ def run_single_experiment(
             "loss_consensus": float(server_diagnostics.get("loss_consensus", 0.0)),
             "loss_align_frac": float(server_diagnostics.get("loss_align_frac", 0.0)),
             "loss_consensus_frac": float(server_diagnostics.get("loss_consensus_frac", 0.0)),
+            "loss_param_reg": float(server_diagnostics.get("loss_param_reg", 0.0)),
+            "loss_param_reg_frac": float(server_diagnostics.get("loss_param_reg_frac", 0.0)),
             "gradA_norm_total": float(server_diagnostics.get("gradA_norm_total", 0.0)),
             "gradB_norm_total": float(server_diagnostics.get("gradB_norm_total", 0.0)),
             "A_norm_total": A_norm_total,
@@ -1015,7 +1031,8 @@ def run_single_experiment(
 
         print(
             f"[MC {exp_idx + 1:03d}] Round {round_idx:03d} | global loss {global_loss:.6e} | "
-            f"align {align_norm:.3e} | consensus {consensus_norm:.3e} | residual {residual_norms['1']}"
+            f"align {align_norm:.3e} | consensus {consensus_norm:.3e} | "
+            f"reg {server_diagnostics.get('loss_param_reg', 0.0):.3e} | residual {residual_norms['1']}"
         )
 
         curr_params = {
@@ -1194,8 +1211,8 @@ def main() -> None:
         rng = np.random.default_rng(seed_value)
         mean_theta = 0
         mean_phi = 0
-        mean_A = 0
-        mean_B = 0
+        mean_A = -0.6
+        mean_B = 0.4
         sigma_theta = 0.02
         sigma_phi = 0.02
         sigma_A = 0.02

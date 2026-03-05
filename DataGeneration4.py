@@ -28,20 +28,48 @@ PROC_NOISE_VAR = 1e-3
 
 # Coupling/stability knobs
 DEPENDENCIES: list[tuple[int, int]] = [(0, 1)]
-OFFDIAG_A_GAIN = 5
+OFFDIAG_A_GAIN = 2
 OFFDIAG_B_DENSITY = 1.0
-OFFDIAG_B_GAIN = 5
+OFFDIAG_B_GAIN = 2
 STABILITY_MARGIN = 1.05
 
-# Input generation knobs
-# INPUT_MODE options: "normal", "correlated"
-INPUT_MODE = "normal"
-NORMAL_INPUT_MEAN = 0
-NORMAL_INPUT_STD = 0.1
-INPUT_LATENT_RANK: int | None = None
-INPUT_KIND = "multisine_ar"
-INPUT_AR_COEFF = 0.7
-INPUT_MULTISINE_K = 8
+# C-matrix generation knobs
+# C_GENERATION options: "random", "constant"
+C_GENERATION = "constant"
+# Used only when C_GENERATION == "constant": one scalar per diagonal block/client.
+C_BLOCK_CONSTANTS: list[float] = [0.8, 0.8]
+
+# Input generation knobs for federated/full-system stream (U_fed)
+# FED_INPUT_MODE options: "normal", "correlated", "mean_shift"
+FED_INPUT_MODE = "mean_shift"
+FED_NORMAL_INPUT_MEAN = 0.25
+FED_NORMAL_INPUT_STD = 0.1
+FED_INPUT_LATENT_RANK: int | None = None
+FED_INPUT_KIND = "multisine_ar"
+FED_INPUT_AR_COEFF = 0.7
+FED_INPUT_MULTISINE_K = 8
+FED_MEAN_SHIFT_BASE_MEAN = 0.0
+FED_MEAN_SHIFT_BASE_VAR = 0.01
+# Each entry: (start_idx, end_idx_exclusive, mean, variance)
+FED_MEAN_SHIFT_WINDOWS: list[tuple[int, int, float, float]] = [[500, 5000, 0.2, 0.1], [5000, 10000, 0.5, 0.1], [10000, 15000, 0.3, 0.1], [15000, 30000, 0.5, 0.1]]
+
+# Input generation knobs for DKF/local-diagonal stream (U_dkf)
+# DKF_INPUT_MODE options: "normal", "correlated", "mean_shift"
+DKF_INPUT_MODE = "normal"
+DKF_NORMAL_INPUT_MEAN = 2
+DKF_NORMAL_INPUT_STD = 0.1
+DKF_INPUT_LATENT_RANK: int | None = None
+DKF_INPUT_KIND = "multisine_ar"
+DKF_INPUT_AR_COEFF = 0.7
+DKF_INPUT_MULTISINE_K = 8
+DKF_MEAN_SHIFT_BASE_MEAN = 0.0
+DKF_MEAN_SHIFT_BASE_VAR = 0.01
+# Each entry: (start_idx, end_idx_exclusive, mean, variance)
+DKF_MEAN_SHIFT_WINDOWS: list[tuple[int, int, float, float]] = []
+
+# Seed offsets for input generators (so fed/dkf streams can be independent)
+FED_INPUT_SEED_OFFSET = 0
+DKF_INPUT_SEED_OFFSET = 10_000
 
 # Output location
 BASE_PATH = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/uai2026/data/dissimilar-dkf"
@@ -104,17 +132,112 @@ def generate_correlated_pe_inputs(
     return u_full
 
 
-def build_inputs(total_time: int, n_u: int, seed: int) -> np.ndarray:
+def build_c_matrix(
+    n_comp: int,
+    d_dim: int,
+    p_dim: int,
+    rng: np.random.RandomState,
+    mode: str,
+    block_constants: list[float] | None,
+) -> np.ndarray:
     """
-    Build control inputs from top-level config.
+    Build block-diagonal observation matrix C.
+
+    - random: each block sampled from N(0,1)
+    - constant: block m is filled with block_constants[m]
+    """
+    if mode == "random":
+        return block_diag(*[rng.randn(d_dim, p_dim) for _ in range(n_comp)])
+
+    if mode == "constant":
+        if block_constants is None:
+            raise ValueError(
+                "C_GENERATION='constant' requires block_constants (one per component)."
+            )
+        if len(block_constants) != n_comp:
+            raise ValueError(
+                f"C constant mode requires {n_comp} block constants, "
+                f"got {len(block_constants)}."
+            )
+        c_blocks = [
+            np.full((d_dim, p_dim), float(block_constants[m]), dtype=float)
+            for m in range(n_comp)
+        ]
+        return block_diag(*c_blocks)
+
+    raise ValueError(f"Unsupported C generation mode: {mode}. Use 'random' or 'constant'.")
+
+
+def generate_mean_shift_inputs(
+    total_time: int,
+    n_u: int,
+    rng: np.random.RandomState,
+    base_mean: float,
+    base_var: float,
+    windows: list[tuple[int, int, float, float]],
+    stream_name: str,
+) -> np.ndarray:
+    """
+    Generate piecewise Gaussian inputs with interval-wise mean/variance shifts.
+
+    Windows use [start, end) indexing and apply to all input channels.
+    Later windows overwrite earlier windows on overlap.
+    """
+    if base_var < 0:
+        raise ValueError(f"{stream_name}: base variance must be >= 0, got {base_var}.")
+
+    u_full = rng.normal(base_mean, np.sqrt(base_var), size=(total_time, n_u))
+    for idx, window in enumerate(windows):
+        if len(window) != 4:
+            raise ValueError(
+                f"{stream_name}: window {idx} must have 4 values "
+                "(start, end, mean, variance)."
+            )
+        t0, t1, mean_i, var_i = window
+        t0 = int(t0)
+        t1 = int(t1)
+        mean_i = float(mean_i)
+        var_i = float(var_i)
+        if t0 < 0 or t1 > total_time or t1 <= t0:
+            raise ValueError(
+                f"{stream_name}: invalid window {idx} = ({t0}, {t1}, {mean_i}, {var_i}) "
+                f"for total_time={total_time}."
+            )
+        if var_i < 0:
+            raise ValueError(
+                f"{stream_name}: variance in window {idx} must be >= 0, got {var_i}."
+            )
+        u_full[t0:t1, :] = rng.normal(mean_i, np.sqrt(var_i), size=(t1 - t0, n_u))
+    return u_full
+
+
+def build_inputs(
+    total_time: int,
+    n_u: int,
+    seed: int,
+    mode: str,
+    normal_mean: float,
+    normal_std: float,
+    latent_rank: int | None,
+    kind: str,
+    ar_coeff: float,
+    multisine_k: int,
+    mean_shift_base_mean: float,
+    mean_shift_base_var: float,
+    mean_shift_windows: list[tuple[int, int, float, float]],
+    stream_name: str,
+) -> np.ndarray:
+    """
+    Build control inputs for one stream from config knobs.
 
     Returns shape (total_time, n_u).
     """
     rng = np.random.RandomState(seed)
-    if INPUT_MODE == "normal":
-        return rng.normal(NORMAL_INPUT_MEAN, NORMAL_INPUT_STD, size=(total_time, n_u))
-    if INPUT_MODE == "correlated":
-        latent_rank = INPUT_LATENT_RANK
+    if mode == "normal":
+        if normal_std < 0:
+            raise ValueError(f"{stream_name}: normal std must be >= 0, got {normal_std}.")
+        return rng.normal(normal_mean, normal_std, size=(total_time, n_u))
+    if mode == "correlated":
         if latent_rank is None:
             latent_rank = max(3, n_u // 2)
         return generate_correlated_pe_inputs(
@@ -122,11 +245,24 @@ def build_inputs(total_time: int, n_u: int, seed: int) -> np.ndarray:
             n_u=n_u,
             rng=rng,
             latent_rank=latent_rank,
-            kind=INPUT_KIND,
-            ar_coeff=INPUT_AR_COEFF,
-            multisine_k=INPUT_MULTISINE_K,
+            kind=kind,
+            ar_coeff=ar_coeff,
+            multisine_k=multisine_k,
         )
-    raise ValueError(f"Unsupported INPUT_MODE: {INPUT_MODE}. Use 'normal' or 'correlated'.")
+    if mode == "mean_shift":
+        return generate_mean_shift_inputs(
+            total_time=total_time,
+            n_u=n_u,
+            rng=rng,
+            base_mean=mean_shift_base_mean,
+            base_var=mean_shift_base_var,
+            windows=mean_shift_windows,
+            stream_name=stream_name,
+        )
+    raise ValueError(
+        f"{stream_name}: unsupported mode '{mode}'. "
+        "Use 'normal', 'correlated', or 'mean_shift'."
+    )
 
 
 def generate_lti_data(
@@ -145,6 +281,8 @@ def generate_lti_data(
     offdiag_b_density: float = 1,
     offdiag_b_gain: float = 100,
     stability_margin: float = 1.05,
+    c_generation: str = "random",
+    c_block_constants: list[float] | None = None,
 ):
     """
     Generate full-system LTI trajectories:
@@ -174,7 +312,14 @@ def generate_lti_data(
     a_mat /= (stability_margin * rho)
 
     # Block-diagonal C.
-    c_mat = block_diag(*[rng.randn(d_dim, p_dim) for _ in range(n_comp)])
+    c_mat = build_c_matrix(
+        n_comp=n_comp,
+        d_dim=d_dim,
+        p_dim=p_dim,
+        rng=rng,
+        mode=c_generation,
+        block_constants=c_block_constants,
+    )
 
     # Q (forced diagonal by block diagonal construction).
     if q_cov is None:
@@ -333,8 +478,41 @@ if __name__ == "__main__":
     q_list = [proc * np.ones(P_DIM) for proc in proc_noise]
     r_list = [var * np.eye(D_DIM) for var in obs_noise]
 
-    # Build inputs explicitly from the chosen input mode.
-    u_samples = build_inputs(TOTAL_TIME, N_COMP * S_DIM, SEED)
+    # Build two independent input streams:
+    # - u_fed: used for full-system (federated) data generation and saved as U.csv.
+    # - u_dkf: used only for local diagonal DKF simulations and saved as U_dkf.csv.
+    u_fed = build_inputs(
+        total_time=TOTAL_TIME,
+        n_u=N_COMP * S_DIM,
+        seed=SEED + FED_INPUT_SEED_OFFSET,
+        mode=FED_INPUT_MODE,
+        normal_mean=FED_NORMAL_INPUT_MEAN,
+        normal_std=FED_NORMAL_INPUT_STD,
+        latent_rank=FED_INPUT_LATENT_RANK,
+        kind=FED_INPUT_KIND,
+        ar_coeff=FED_INPUT_AR_COEFF,
+        multisine_k=FED_INPUT_MULTISINE_K,
+        mean_shift_base_mean=FED_MEAN_SHIFT_BASE_MEAN,
+        mean_shift_base_var=FED_MEAN_SHIFT_BASE_VAR,
+        mean_shift_windows=FED_MEAN_SHIFT_WINDOWS,
+        stream_name="FED",
+    )
+    u_dkf = build_inputs(
+        total_time=TOTAL_TIME,
+        n_u=N_COMP * S_DIM,
+        seed=SEED + DKF_INPUT_SEED_OFFSET,
+        mode=DKF_INPUT_MODE,
+        normal_mean=DKF_NORMAL_INPUT_MEAN,
+        normal_std=DKF_NORMAL_INPUT_STD,
+        latent_rank=DKF_INPUT_LATENT_RANK,
+        kind=DKF_INPUT_KIND,
+        ar_coeff=DKF_INPUT_AR_COEFF,
+        multisine_k=DKF_INPUT_MULTISINE_K,
+        mean_shift_base_mean=DKF_MEAN_SHIFT_BASE_MEAN,
+        mean_shift_base_var=DKF_MEAN_SHIFT_BASE_VAR,
+        mean_shift_windows=DKF_MEAN_SHIFT_WINDOWS,
+        stream_name="DKF",
+    )
 
     # Print effective config so there is no ambiguity about what is used.
     print("DataGeneration4 effective config:")
@@ -346,12 +524,30 @@ if __name__ == "__main__":
         f"stability_margin={STABILITY_MARGIN}",
     )
     print(
-        "  input:",
-        f"mode={INPUT_MODE}, normal_mean={NORMAL_INPUT_MEAN}, normal_std={NORMAL_INPUT_STD},",
-        f"latent_rank={INPUT_LATENT_RANK}, kind={INPUT_KIND},",
-        f"ar_coeff={INPUT_AR_COEFF}, multisine_k={INPUT_MULTISINE_K}",
+        "  C generation:",
+        f"mode={C_GENERATION}, block_constants={C_BLOCK_CONSTANTS}",
     )
-    print(f"  seed={SEED}, local_dkf_seed_offset={LOCAL_DKF_SEED_OFFSET}")
+    print(
+        "  fed input:",
+        f"mode={FED_INPUT_MODE}, normal_mean={FED_NORMAL_INPUT_MEAN}, normal_std={FED_NORMAL_INPUT_STD},",
+        f"latent_rank={FED_INPUT_LATENT_RANK}, kind={FED_INPUT_KIND},",
+        f"ar_coeff={FED_INPUT_AR_COEFF}, multisine_k={FED_INPUT_MULTISINE_K},",
+        f"mean_shift_base=({FED_MEAN_SHIFT_BASE_MEAN}, {FED_MEAN_SHIFT_BASE_VAR}),",
+        f"mean_shift_windows={FED_MEAN_SHIFT_WINDOWS}",
+    )
+    print(
+        "  dkf input:",
+        f"mode={DKF_INPUT_MODE}, normal_mean={DKF_NORMAL_INPUT_MEAN}, normal_std={DKF_NORMAL_INPUT_STD},",
+        f"latent_rank={DKF_INPUT_LATENT_RANK}, kind={DKF_INPUT_KIND},",
+        f"ar_coeff={DKF_INPUT_AR_COEFF}, multisine_k={DKF_INPUT_MULTISINE_K},",
+        f"mean_shift_base=({DKF_MEAN_SHIFT_BASE_MEAN}, {DKF_MEAN_SHIFT_BASE_VAR}),",
+        f"mean_shift_windows={DKF_MEAN_SHIFT_WINDOWS}",
+    )
+    print(
+        "  seeds:",
+        f"base={SEED}, fed_input_offset={FED_INPUT_SEED_OFFSET},",
+        f"dkf_input_offset={DKF_INPUT_SEED_OFFSET}, local_dkf_seed_offset={LOCAL_DKF_SEED_OFFSET}",
+    )
     print(f"  base_path={BASE_PATH}")
 
     x, y, A, B, C, Qmat, Rmat, u = generate_lti_data(
@@ -362,7 +558,7 @@ if __name__ == "__main__":
         total_time=TOTAL_TIME,
         r_cov=r_list,
         q_cov=q_list,
-        u_full=u_samples,
+        u_full=u_fed,
         b_full=None,
         seed=SEED,
         dependencies=DEPENDENCIES,
@@ -370,6 +566,8 @@ if __name__ == "__main__":
         offdiag_b_density=OFFDIAG_B_DENSITY,
         offdiag_b_gain=OFFDIAG_B_GAIN,
         stability_margin=STABILITY_MARGIN,
+        c_generation=C_GENERATION,
+        c_block_constants=C_BLOCK_CONSTANTS,
     )
 
     is_pe, eigvals_u = check_persistence_of_excitation(u)
@@ -396,6 +594,7 @@ if __name__ == "__main__":
         x_i = x[:, i * P_DIM:(i + 1) * P_DIM]
         y_i = y[:, i * D_DIM:(i + 1) * D_DIM]
         u_i = u[:, i * S_DIM:(i + 1) * S_DIM]
+        u_dkf_i = u_dkf[:, i * S_DIM:(i + 1) * S_DIM]
 
         a_i = A[i * P_DIM:(i + 1) * P_DIM, i * P_DIM:(i + 1) * P_DIM]
         c_i = C[i * D_DIM:(i + 1) * D_DIM, i * P_DIM:(i + 1) * P_DIM]
@@ -408,6 +607,7 @@ if __name__ == "__main__":
         np.savetxt(os.path.join(comp_dir, "X.csv"), x_i, delimiter=",")
         np.savetxt(os.path.join(comp_dir, "Y.csv"), y_i, delimiter=",")
         np.savetxt(os.path.join(comp_dir, "U.csv"), u_i, delimiter=",")
+        np.savetxt(os.path.join(comp_dir, "U_dkf.csv"), u_dkf_i, delimiter=",")
         np.savetxt(os.path.join(comp_dir, "A.csv"), a_i, delimiter=",")
         np.savetxt(os.path.join(comp_dir, "C.csv"), c_i, delimiter=",")
         np.savetxt(os.path.join(comp_dir, "B.csv"), b_i, delimiter=",")
@@ -423,7 +623,7 @@ if __name__ == "__main__":
             q_loc=q_i,
             r_loc=r_i,
             x0_loc=x0_i.reshape(-1, 1),
-            u_loc=u_i,
+            u_loc=u_dkf_i,
             local_seed=SEED + LOCAL_DKF_SEED_OFFSET + i,
         )
         np.savetxt(os.path.join(comp_dir, "Y_dkf.csv"), y_dkf_i, delimiter=",")

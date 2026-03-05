@@ -161,8 +161,9 @@ class LocalModel:
             # Prepare for next step sampling h_{m,a}^{k,t}
             prev_estimate = h_est_t
 
-        # self.local_loss = self.local_loss / self.T + self.lambda_l * np.linalg.norm(self.theta, 'fro') ** 2
-        self.local_loss = self.local_loss / self.T
+        theta_reg = np.linalg.norm(self.theta, ord='fro') ** 2
+        phi_reg = np.linalg.norm(self.phi) ** 2
+        self.local_loss = self.local_loss / self.T + self.lambda_l * (theta_reg + phi_reg)
         self._forward_ran = True
 
         return {
@@ -208,6 +209,8 @@ class LocalModel:
         cT_residuals = self.C.T @ residuals
         grad_phi_local = -(2.0 / self.T) * np.sum(cT_residuals, axis=1, keepdims=True)
         grad_theta_local = -(2.0 / self.T) * (self.A.T @ cT_residuals) @ y_prev.T
+        grad_theta_local += 2.0 * self.lambda_l * self.theta
+        grad_phi_local += 2.0 * self.lambda_l * self.phi
 
         # Server-induced gradients (line 36 accumulation)
         grad_theta_server = (self.A.T @ gradx) @ y_prev.T

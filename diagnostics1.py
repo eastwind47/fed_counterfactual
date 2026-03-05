@@ -158,7 +158,7 @@ def _ylabel(metric_name: str) -> str:
     if metric_name == "loss_consensus_frac":
         return r"Consensus fraction"
     if metric_name.startswith("local_loss_"):
-        return r"Local loss"
+        return r"Client residual"
     if metric_name.startswith("grad_norm_"):
         return r"Client gradient norm"
     if metric_name.startswith("residual_norm_"):
@@ -286,18 +286,24 @@ def main() -> None:
 
         rounds = np.arange(1, mean.size + 1)
         fig, ax = plt.subplots(figsize=(8, 6))
-        ax.plot(rounds, mean, color=colorblind_colors[1])
+        line_label = None
+        if metric_name.startswith("local_loss_"):
+            cid = metric_name.split("_")[-1]
+            line_label = rf"$L_{{{cid},a}}^k$"
+        ax.plot(rounds, mean, color=colorblind_colors[1], label=line_label)
         ax.fill_between(
             rounds,
             mean - std,
             mean + std,
             color=colorblind_colors[1],
             alpha=0.25,
-            label=r"$\pm 1$ std",
         )
 
         ax.set_xlabel("Number of iterations ($k$)", fontsize=25)
-        ax.set_ylabel(_ylabel(metric_name), fontsize=25)
+        if metric_name == "consensus_norm" or metric_name.startswith("phi_consensus_err_"):
+            ax.set_ylabel("")
+        else:
+            ax.set_ylabel(_ylabel(metric_name), fontsize=25)
         ax.grid(True, alpha=0.3)
 
         if metric_name.startswith("local_loss_"):
@@ -308,7 +314,7 @@ def main() -> None:
                     color=colorblind_colors[0],
                     linestyle="--",
                     linewidth=2,
-                    label=r"DKF squared-residual reference",
+                    label=rf"$\frac{{1}}{{T}}\sum_{{t=1}}^T \|r_{{{cid},c}}^t\|_2^2$",
                 )
             ax.legend(fontsize=20)
 

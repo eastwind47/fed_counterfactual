@@ -61,8 +61,8 @@ VALIDATION_OUTPUT_DIR: str = "/Users/home/Documents/naz/research_codes/counterfa
 # Validation window:
 # - If VALID_T0 is None, it defaults to training_time.
 # - If VALID_T1 is None, it defaults to min(total_time, VALID_T0 + VALID_WINDOW).
-VALID_T0: int | None = 15000
-VALID_T1: int | None = 20000
+VALID_T0: int | None = 12000
+VALID_T1: int | None = 17000
 VALID_WINDOW: int = 5000
 
 # Warm-start Kalman filters by running predict/update from t=0..VALID_T0-1.
@@ -932,7 +932,7 @@ def _plot_sqerr_traces(
     """
     m_count = fed_server_sqerr_runs.shape[1]
     n_steps = fed_server_sqerr_runs.shape[2]
-    t_axis = np.arange(valid_t0, valid_t0 + n_steps)
+    t_axis = np.arange(n_steps)
 
     for m in range(m_count):
         fed_mean = np.mean(fed_server_sqerr_runs[:, m, :], axis=0)
@@ -981,6 +981,96 @@ def _plot_sqerr_traces(
         fig.tight_layout()
         fig.savefig(
             out_dir / "plots" / f"sqerr_trace_client_{m + 1}.pdf",
+            format="pdf",
+            dpi=800,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+
+def _plot_pred_error_traces_three_models(
+    out_dir: Path,
+    valid_t0: int,
+    fed_server_sqerr_runs: np.ndarray,
+    local_model_sqerr_runs: np.ndarray,
+    dkf_sqerr: np.ndarray,
+    ckf_sqerr: np.ndarray,
+    smooth_window: int,
+) -> None:
+    """
+    Plot one-step prediction error norm over validation time for models:
+      - Fed-server (mean +/- std across Monte Carlo runs)
+      - Local-model (mean +/- std across Monte Carlo runs)
+      - DKF
+      - CKF
+
+    The plotted quantity per time step is:
+      ||e_t^(m)||_2 = sqrt( ||y_t^(m) - yhat_t^(m)||_2^2 ).
+    """
+    m_count = fed_server_sqerr_runs.shape[1]
+    n_steps = fed_server_sqerr_runs.shape[2]
+    t_axis = np.arange(n_steps)
+
+    # Convert squared-error traces into error-norm traces.
+    fed_server_err_runs = np.sqrt(np.maximum(fed_server_sqerr_runs, 0.0))
+    local_model_err_runs = np.sqrt(np.maximum(local_model_sqerr_runs, 0.0))
+    dkf_err = np.sqrt(np.maximum(dkf_sqerr, 0.0))
+    ckf_err = np.sqrt(np.maximum(ckf_sqerr, 0.0))
+
+    for m in range(m_count):
+        fed_mean = np.mean(fed_server_err_runs[:, m, :], axis=0)
+        fed_std = np.std(fed_server_err_runs[:, m, :], axis=0)
+        local_mean = np.mean(local_model_err_runs[:, m, :], axis=0)
+        local_std = np.std(local_model_err_runs[:, m, :], axis=0)
+        dkf = dkf_err[m, :]
+        ckf = ckf_err[m, :]
+
+        fed_mean_s = _moving_average(fed_mean, smooth_window)
+        fed_up_s = _moving_average(fed_mean + fed_std, smooth_window)
+        fed_lo_s = _moving_average(np.maximum(fed_mean - fed_std, 0.0), smooth_window)
+        local_mean_s = _moving_average(local_mean, smooth_window)
+        local_up_s = _moving_average(local_mean + local_std, smooth_window)
+        local_lo_s = _moving_average(np.maximum(local_mean - local_std, 0.0), smooth_window)
+        dkf_s = _moving_average(dkf, smooth_window)
+        ckf_s = _moving_average(ckf, smooth_window)
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.plot(
+            t_axis,
+            fed_mean_s,
+            label="Server Model (ours)",
+            color=colorblind_colors[3],
+        )
+        ax.fill_between(
+            t_axis,
+            fed_lo_s,
+            fed_up_s,
+            color=colorblind_colors[3],
+            alpha=0.25,
+        )
+        ax.plot(
+            t_axis,
+            local_mean_s,
+            label="ACM (ours)",
+            color=colorblind_colors[2],
+        )
+        ax.fill_between(
+            t_axis,
+            local_lo_s,
+            local_up_s,
+            color=colorblind_colors[2],
+            alpha=0.20,
+        )
+        ax.plot(t_axis, dkf_s, label="PCM", color=colorblind_colors[1])
+        ax.plot(t_axis, ckf_s, label="Centralized Oracle", color=colorblind_colors[4])
+        ax.set_xlabel("Time index ($t$)", fontsize=25)
+        ax.set_ylabel(r"$\|y - \hat{y}\|_2$", fontsize=25)
+        ax.tick_params(axis="both", labelsize=20)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=20)
+        fig.tight_layout()
+        fig.savefig(
+            out_dir / "plots" / f"pred_error_valid_{m + 1}.pdf",
             format="pdf",
             dpi=800,
             bbox_inches="tight",
@@ -1450,6 +1540,15 @@ def main() -> None:
         ckf_rmse,
     )
     _plot_sqerr_traces(
+        out_dir=out_dir,
+        valid_t0=valid_t0,
+        fed_server_sqerr_runs=fed_server_sqerr_runs_arr,
+        local_model_sqerr_runs=local_model_sqerr_runs_arr,
+        dkf_sqerr=dkf_sqerr,
+        ckf_sqerr=ckf_sqerr,
+        smooth_window=int(max(1, SMOOTH_WINDOW)),
+    )
+    _plot_pred_error_traces_three_models(
         out_dir=out_dir,
         valid_t0=valid_t0,
         fed_server_sqerr_runs=fed_server_sqerr_runs_arr,

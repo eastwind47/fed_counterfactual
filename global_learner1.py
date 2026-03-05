@@ -57,6 +57,7 @@ class GlobalModel:
         self.grad_B_total = 0.0
         self.loss_align = 0.0
         self.loss_consensus = 0.0
+        self.loss_param_reg = 0.0
 
         # Server-side trajectory trackers
         self.h_server = {
@@ -170,15 +171,19 @@ class GlobalModel:
                         grad_B_accum[key_off] += -2.0 * (residual_curr @ u_peer.T)
 
         loss_value = total_loss / self.T
+        reg_A = sum(np.linalg.norm(val, ord='fro') ** 2 for val in self.A_mn.values())
+        reg_B = sum(np.linalg.norm(val, ord='fro') ** 2 for val in self.B_mn.values())
+        self.loss_param_reg = float(self.lambda_g * (reg_A + reg_B))
+        loss_value += self.loss_param_reg
         for key in gradx:
             gradx[key] /= self.T
             self.gradx_history[key][:, :] = gradx[key]
             self.gradx_est_history[key][:, :] = gradx_est[key] / self.T
 
         for key, value in grad_A_accum.items():
-            self.grad_A[key][:, :] = value / self.T
+            self.grad_A[key][:, :] = value / self.T + 2.0 * self.lambda_g * self.A_mn[key]
         for key, value in grad_B_accum.items():
-            self.grad_B[key][:, :] = value / self.T
+            self.grad_B[key][:, :] = value / self.T + 2.0 * self.lambda_g * self.B_mn[key]
 
         self.server_loss = loss_value
         self.loss_align = float(loss_align_total / self.T)
@@ -202,6 +207,7 @@ class GlobalModel:
             "loss": loss_value,
             "loss_align": self.loss_align,
             "loss_consensus": self.loss_consensus,
+            "loss_param_reg": self.loss_param_reg,
             "gradx": {key: gradx[key].copy() for key in gradx},
             "gradx_est": {key: gradx_est[key].copy() for key in gradx_est},
             "grad_A_norms": self.grad_A_norms.copy(),

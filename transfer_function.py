@@ -8,7 +8,7 @@ Outputs (default under the couplings file directory / transfer_function):
 - transfer_function_poles.csv (poles of A_true and A_est)
 - transfer_function_zeros.json (per-SISO zeros for true and estimated)
 - transfer_function_coefficients.json (per-entry numerator/denominator coefficients)
-- plots/*.pdf (error curve, sigma_max curve)
+- plots/*.pdf (error curve, sigma_max curve, pole/zero maps)
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from data_retriever import RetrieveData
 # Example:
 # est_data_loc = "/path/to/results/main1/mc_001/couplings_final.npz"
 # ------------------------------------------------------------------
-est_data_loc = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/norm_comp_2/Components_2/rebuttal/main1/mc_002/couplings_final.npz"
+est_data_loc = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/uai2026/exp-results/fedcount/dissimilar-dkf/main1/mc_003/couplings_final.npz"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -379,6 +379,61 @@ def _save_poles_csv(path: Path, poles_true: np.ndarray, poles_est: np.ndarray) -
     path.write_text("\n".join(lines))
 
 
+def _flatten_zero_dict(zeros_payload: Dict[str, list[list[float]]]) -> np.ndarray:
+    """Convert per-SISO zero dictionary to a single complex array."""
+    values: list[complex] = []
+    for entries in zeros_payload.values():
+        for pair in entries:
+            if len(pair) != 2:
+                continue
+            values.append(complex(float(pair[0]), float(pair[1])))
+    if not values:
+        return np.array([], dtype=complex)
+    return np.asarray(values, dtype=complex)
+
+
+def _plot_complex_points(
+    true_vals: np.ndarray,
+    est_vals: np.ndarray,
+    title: str,
+    out_path: Path,
+    true_label: str,
+    est_label: str,
+) -> None:
+    """Plot true/estimated complex points in the z-plane with unit circle."""
+    plt.figure(figsize=(8, 5))
+    theta = np.linspace(0.0, 2.0 * np.pi, 400)
+    plt.plot(np.cos(theta), np.sin(theta), "--", color="gray", alpha=0.6, label="unit circle")
+
+    if true_vals.size > 0:
+        plt.scatter(
+            true_vals.real,
+            true_vals.imag,
+            marker="o",
+            facecolors="none",
+            edgecolors="#377eb8",
+            label=true_label,
+        )
+    if est_vals.size > 0:
+        plt.scatter(
+            est_vals.real,
+            est_vals.imag,
+            marker="x",
+            color="#e41a1c",
+            label=est_label,
+        )
+
+    plt.title(title)
+    plt.xlabel("Real part")
+    plt.ylabel("Imaginary part")
+    plt.grid(True, alpha=0.3)
+    plt.axis("equal")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, format="pdf", dpi=200)
+    plt.close()
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -500,6 +555,55 @@ def main() -> None:
     plt.tight_layout()
     plt.savefig(plots_dir / "sigma_max_vs_omega.pdf", format="pdf", dpi=200)
     plt.close()
+
+    # Full singular-value spectrum across frequency.
+    plt.figure(figsize=(8, 5))
+    n_sv = sigma_true.shape[1]
+    cmap = plt.get_cmap("tab10")
+    for idx in range(n_sv):
+        color = cmap(idx % 10)
+        plt.plot(
+            omega,
+            sigma_true[:, idx],
+            color=color,
+            linestyle="-",
+            linewidth=1.5,
+            label=f"true $\\sigma_{idx + 1}$",
+        )
+        plt.plot(
+            omega,
+            sigma_est[:, idx],
+            color=color,
+            linestyle="--",
+            linewidth=1.5,
+            label=f"est $\\sigma_{idx + 1}$",
+        )
+    plt.xlabel(r"$\omega$")
+    plt.ylabel(r"Singular values of $G(e^{j\omega})$")
+    plt.grid(True, alpha=0.3)
+    plt.legend(ncol=2)
+    plt.tight_layout()
+    plt.savefig(plots_dir / "sigma_spectrum_vs_omega.pdf", format="pdf", dpi=200)
+    plt.close()
+
+    zeros_true_flat = _flatten_zero_dict(zeros_true)
+    zeros_est_flat = _flatten_zero_dict(zeros_est)
+    _plot_complex_points(
+        true_vals=poles_true,
+        est_vals=poles_est,
+        title="Poles in z-plane (true vs estimated)",
+        out_path=plots_dir / "poles_true_vs_est.pdf",
+        true_label="poles true",
+        est_label="poles est",
+    )
+    _plot_complex_points(
+        true_vals=zeros_true_flat,
+        est_vals=zeros_est_flat,
+        title="Zeros in z-plane (true vs estimated)",
+        out_path=plots_dir / "zeros_true_vs_est.pdf",
+        true_label="zeros true",
+        est_label="zeros est",
+    )
 
     print(f"Saved transfer-function outputs to {out_dir}")
 

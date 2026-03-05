@@ -18,9 +18,9 @@ from local_learner1 import LocalModel  # client-side model (v1)
 # -----------------------------------------------------------------------------
 CONFIG_PATH = "config.ini"  # configuration file to reuse the training setup
 RESULTS_SUBDIR = "main1"  # default subfolder under results_location for v1 artifacts
-TRAINING_RESULTS_DIR = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/norm_comp_2/Components_2/rebuttal/main1/mc_001"  # override path to trained results (if set, bypass results_location)
+TRAINING_RESULTS_DIR = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/uai2026/exp-results/fedcount/dissimilar-dkf/main1/mc_003"  # override path to trained results (if set, bypass results_location)
 SNAPSHOTS_DIR = None  # override path to snapshots (if set, bypass <results>/snapshots)
-COUNTERFACTUAL_OUTPUT_DIR = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/norm_comp_2/Components_2/rebuttal/count_exp_results"  # override path to save metrics/plots (if set, bypass <results>/counterfactual)
+COUNTERFACTUAL_OUTPUT_DIR = "/Users/home/Documents/naz/research_codes/counterfactual_reasoning/synthetic_exp/uai2026/exp-results/fedcount/dissimilar-dkf/main1/mc_003/count_exp_results"  # override path to save metrics/plots (if set, bypass <results>/counterfactual)
 T_TEST = 300  # length of the synthetic test trajectory
 INTERVENED_CLIENT = 1  # client id (1-based) that receives the intervention
 INTERVENTION_TIME = 100  # single timestep for the intervention
