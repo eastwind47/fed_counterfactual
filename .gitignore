@@ -1,8 +1,73 @@
+# Local-only, not tracked:
+#   CLAUDE.md            — coding-standards doc
+#   legacy/              — embedded reference copy of the previous codebase (for porting);
+#                          the original also lives on the exp/dissimilar-dkf branch.
+CLAUDE.md
+legacy/
+
+# Python
 __pycache__/
-*.pyc
-results/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Generated datasets (large; regenerate with generate_data.py)
+data/datasets/
+
+# Data files (large; stored separately under the experiment data path)
 *.pkl
-*.npz
 *.csv
+*.mat
+*.npy
+*.npz
+*.h5
+*.hdf5
+
+# Results & outputs (generated, not source)
+results/
+outputs/
+figures/
+*.png
+*.pdf
+*.eps
+*.svg
+
+# macOS
 .DS_Store
-.env
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Logs
+*.log
+logs/
+
+# Local config overrides
+config.local.*
+
+# LaTeX build artefacts
+*.aux
+*.out
+*.synctex.gz
+*.toc
+*.fdb_latexmk
+*.fls
